@@ -10,7 +10,10 @@ import streamlit.components.v1 as components
 from plotly.subplots import make_subplots
 
 st.title("Variantes de ClinVar sobre las proteínas CD3")
-st.caption("Prototipo: lee directamente el archivo descargado de ClinVar, sin limpiar.")
+st.caption("Lee `datos/ejemplos/variantes_conocidas.csv`, generado por "
+           "`analisis/variantes_conocidas.py`.")
+
+ARCHIVO_VARIANTES = Path("datos/ejemplos/variantes_conocidas.csv")
 
 # ---------------------------------------------------------------
 # 1. Leer las regiones y elegir la proteína
@@ -21,74 +24,104 @@ gen = st.selectbox("Proteína", regiones["gen"].unique())
 regiones_gen = regiones[regiones["gen"] == gen]
 
 # ---------------------------------------------------------------
-# 2. Leer el archivo de ClinVar de ese gen
+# 2. Leer las variantes ya procesadas
 # ---------------------------------------------------------------
-archivo_clinvar = Path(f"datos/clinvar/clinvar_{gen}.tsv")
-if not archivo_clinvar.exists():
-    st.warning(f"Todavía no hay variantes descargadas para {gen}. "
-               f"Debe existir el archivo `{archivo_clinvar}`.")
+if not ARCHIVO_VARIANTES.exists():
+    st.error(f"No se encontró `{ARCHIVO_VARIANTES}`. Primero corre:\n\n"
+             "`python analisis/variantes_conocidas.py`")
     st.stop()
 
-# sep="\t" porque el archivo está separado por tabulaciones.
-# index_col=False evita que pandas use la primera columna como índice
-# cuando las filas traen una tabulación de más al final.
-clinvar = pd.read_csv(archivo_clinvar, sep="\t", index_col=False)
-
-# ---------------------------------------------------------------
-# 3. Sacar de cada fila lo que necesitamos
-# ---------------------------------------------------------------
-def extraer_cambio_p(nombre):
-    """Del nombre 'NM_...:c.176G>A (p.Trp59Ter)' saca 'p.Trp59Ter'."""
-    encontrado = re.search(r"\((p\.[^)]+)\)", nombre)
-    return encontrado.group(1) if encontrado else None
-
-
-def extraer_posicion(nombre):
-    """Del nombre 'NM_...:c.176G>A (p.Trp59Ter)' saca el número 59."""
-    # p. + tres letras del aminoácido + el número
-    encontrado = re.search(r"\(p\.[A-Za-z]{3}(\d+)", nombre)
-    return int(encontrado.group(1)) if encontrado else None
-
-
-def simplificar_consecuencia(texto):
-    """'frameshift variant' -> 'frameshift', etc."""
-    texto = str(texto)
-    for tipo in ["frameshift", "nonsense", "missense"]:
-        if tipo in texto:
-            return tipo
-    return "otra"
-
+todas = pd.read_csv(ARCHIVO_VARIANTES)
+todas_gen = todas[todas["gen"] == gen]
 
 # El review status viene en texto; lo convertimos a estrellas
 ESTRELLAS = {
     "no assertion criteria provided": 0,
     "criteria provided, single submitter": 1,
     "criteria provided, multiple submitters, no conflicts": 2,
+    "criteria provided, conflicting classifications": 1,
     "reviewed by expert panel": 3,
     "practice guideline": 4,
 }
 
-# Altura del "chupetín" según la clasificación
+# Altura del "chupetín" según el grupo clínico
 NIVEL = {
-    "Likely pathogenic": 1,
-    "Pathogenic/Likely pathogenic": 2,
-    "Pathogenic": 3,
+    "Benigna": 1,
+    "Sin_clasificar": 1.5,
+    "VUS": 2,
+    "Conflicto": 2.5,
+    "Patogenica": 3,
 }
 
+# Tipos de variante que cambian un aminoácido concreto (se pueden dibujar)
+CON_POSICION = ["missense", "nonsense", "frameshift", "inframe_indel",
+                "perdida_inicio", "perdida_stop", "sinonima"]
+
 variantes = pd.DataFrame({
-    "cambio_p": clinvar["Name"].apply(extraer_cambio_p),
-    "posicion_aa": clinvar["Name"].apply(extraer_posicion),
-    "consecuencia": clinvar["Molecular consequence"].apply(simplificar_consecuencia),
-    "clasificacion": clinvar["Germline classification"],
-    "estrellas": clinvar["Germline review status"].map(ESTRELLAS),
-    "condicion": clinvar["Condition(s)"],
-    "clinvar_id": clinvar["VariationID"],
+    "cambio_p": todas_gen["hgvs_p"],
+    "posicion_aa": todas_gen["posicion_proteina"],
+    "aa_ref": todas_gen["aa_ref"],
+    "consecuencia": todas_gen["consecuencia"],
+    "grupo": todas_gen["grupo"],
+    "clasificacion": todas_gen["ClinicalSignificance"],
+    "estrellas": todas_gen["ReviewStatus"].map(ESTRELLAS),
+    "tirosina_ITAM": todas_gen["tirosina_ITAM"],
+    "condicion": todas_gen["PhenotypeList"],
+    "cambio_c": todas_gen["hgvs_c"],
+    "clinvar_id": todas_gen["VariationID"],
 })
 
-# Las variantes sin cambio en la proteína (p. ej. splice site) no se pueden ubicar
-sin_posicion = variantes["posicion_aa"].isna().sum()
+# ---------------------------------------------------------------
+# 3. Filtros
+# ---------------------------------------------------------------
+# Nombre que se muestra en pantalla para cada valor del CSV
+ETIQUETAS_GRUPO = {
+    "Patogenica": "Patogénica",
+    "Conflicto": "En conflicto",
+    "VUS": "Incierta (VUS)",
+    "Sin_clasificar": "Sin clasificar",
+    "Benigna": "Benigna",
+}
+ETIQUETAS_CONSECUENCIA = {
+    "missense": "Missense",
+    "nonsense": "Nonsense",
+    "frameshift": "Frameshift",
+    "inframe_indel": "Inserción/deleción sin corrimiento",
+    "perdida_inicio": "Pérdida del inicio",
+    "perdida_stop": "Pérdida del stop",
+    "sinonima": "Sinónima",
+}
+GRUPOS_POR_DEFECTO = ["Patogenica", "Conflicto", "VUS"]
+
+
+def casillas(titulo, etiquetas, marcadas):
+    """Una casilla por opción en la barra lateral. Devuelve las opciones marcadas."""
+    st.sidebar.subheader(titulo)
+    return [valor for valor, texto in etiquetas.items()
+            if st.sidebar.checkbox(texto, value=valor in marcadas, key=f"{titulo}_{valor}")]
+
+
+st.sidebar.header("Filtros")
+grupos_elegidos = casillas("Grupo clínico", ETIQUETAS_GRUPO, GRUPOS_POR_DEFECTO)
+consecuencias_elegidas = casillas("Consecuencia", ETIQUETAS_CONSECUENCIA,
+                                  [c for c in CON_POSICION if c != "sinonima"])
+st.sidebar.subheader("Otros")
+solo_itam = st.sidebar.checkbox("Solo las que cambian una tirosina del ITAM")
+
+# Las variantes sin cambio en la proteína (splicing, intrónicas, UTR) no se
+# pueden ubicar en el dibujo: se cuentan aparte
+sin_posicion = variantes[variantes["posicion_aa"].isna()]
 variantes = variantes.dropna(subset=["posicion_aa"])
 variantes["posicion_aa"] = variantes["posicion_aa"].astype(int)
+
+variantes = variantes[variantes["grupo"].isin(grupos_elegidos)
+                      & variantes["consecuencia"].isin(consecuencias_elegidas)]
+if solo_itam:
+    variantes = variantes[variantes["tirosina_ITAM"]]
+
+if variantes.empty:
+    st.warning("Ninguna variante cumple los filtros elegidos.")
+    st.stop()
 
 # ---------------------------------------------------------------
 # 4. Relacionar cada variante con su región
@@ -123,7 +156,10 @@ COLORES_CONSECUENCIA = {
     "missense": "#e8a33d",
     "nonsense": "#b5179e",
     "frameshift": "#7209b7",
-    "otra": "#888888",
+    "inframe_indel": "#3a86ff",
+    "perdida_inicio": "#d00000",
+    "perdida_stop": "#6a994e",
+    "sinonima": "#bbbbbb",
 }
 CARRILES = {
     "peptido_senal": "Topología",
@@ -133,6 +169,12 @@ CARRILES = {
     "motif": "Motivos",
 }
 
+# Variantes en la misma posición y grupo se separan un poco en altura,
+# para que no queden una encima de otra
+variantes = variantes.sort_values(["posicion_aa", "grupo", "cambio_p"])
+variantes["altura"] = (variantes["grupo"].map(NIVEL)
+                       + 0.12 * variantes.groupby(["posicion_aa", "grupo"]).cumcount())
+
 fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                     row_heights=[0.55, 0.45], vertical_spacing=0.04)
 
@@ -140,23 +182,26 @@ fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
 palitos_x, palitos_y = [], []
 for _, v in variantes.iterrows():
     palitos_x += [v["posicion_aa"], v["posicion_aa"], None]
-    palitos_y += [0, NIVEL.get(v["clasificacion"], 0.5), None]
+    palitos_y += [0, v["altura"], None]
 fig.add_trace(go.Scatter(x=palitos_x, y=palitos_y, mode="lines",
-                         line=dict(color="#aaaaaa", width=1),
+                         line=dict(color="#cccccc", width=1),
                          hoverinfo="skip", showlegend=False), row=1, col=1)
 
-# 5b. Las "cabezas" de los chupetines, un color por tipo de consecuencia
+# 5b. Las "cabezas": color según la consecuencia; estrella si toca una tirosina del ITAM
 for consecuencia, grupo in variantes.groupby("consecuencia"):
     fig.add_trace(go.Scatter(
         x=grupo["posicion_aa"],
-        y=grupo["clasificacion"].map(NIVEL).fillna(0.5),
+        y=grupo["altura"],
         mode="markers",
-        marker=dict(size=11, color=COLORES_CONSECUENCIA.get(consecuencia, "#888888"),
+        marker=dict(size=[16 if t else 10 for t in grupo["tirosina_ITAM"]],
+                    symbol=["star" if t else "circle" for t in grupo["tirosina_ITAM"]],
+                    color=COLORES_CONSECUENCIA.get(consecuencia, "#888888"),
                     line=dict(width=1, color="white")),
-        name=consecuencia,
-        customdata=grupo[["cambio_p", "clasificacion", "estrellas", "regiones"]],
+        name=ETIQUETAS_CONSECUENCIA.get(consecuencia, consecuencia),
+        customdata=grupo[["cambio_p", "clasificacion", "estrellas", "regiones", "condicion"]],
         hovertemplate=("<b>%{customdata[0]}</b><br>%{customdata[1]} "
-                       "(%{customdata[2]} ★)<br>Región: %{customdata[3]}<extra></extra>"),
+                       "(%{customdata[2]} ★)<br>Región: %{customdata[3]}"
+                       "<br>%{customdata[4]}<extra></extra>"),
     ), row=1, col=1)
 
 # 5c. Las barras de regiones (igual que en ver_proteinas.py)
@@ -174,21 +219,31 @@ numero_carriles = regiones_gen.apply(
     lambda f: f["descripcion"] if f["tipo"] == "region" else CARRILES.get(f["tipo"], "Otros"), axis=1
 ).nunique()
 
-fig.update_layout(barmode="overlay", height=330 + 40 * numero_carriles,
+fig.update_layout(barmode="overlay", height=380 + 40 * numero_carriles,
                   margin=dict(t=20), legend_title_text="Consecuencia")
-fig.update_yaxes(row=1, col=1, range=[0, 3.6], tickvals=[1, 2, 3],
-                 ticktext=["Likely path.", "Path./Likely path.", "Pathogenic"])
+fig.update_yaxes(row=1, col=1, range=[0, variantes["altura"].max() + 0.5],
+                 tickvals=list(NIVEL.values()), ticktext=[ETIQUETAS_GRUPO[g] for g in NIVEL])
 fig.update_yaxes(row=2, col=1, autorange="reversed")
 fig.update_xaxes(row=2, col=1, title_text="Posición (aminoácido)",
                  range=[0, regiones_gen["fin"].max() + 5])
 
 st.plotly_chart(fig)
+st.caption("★ = la variante cambia una tirosina del ITAM.")
 
 # ---------------------------------------------------------------
-# 6. Resumen y tabla
+# 6. Resumen y tablas
 # ---------------------------------------------------------------
-st.write(f"**{len(variantes)}** variantes ubicadas en la proteína."
-         + (f" Se omitieron {sin_posicion} sin cambio en la proteína." if sin_posicion else ""))
+st.write(f"**{len(variantes)}** variantes ubicadas en la proteína con los filtros elegidos.")
+
+if not sin_posicion.empty:
+    with st.expander(f"{len(sin_posicion)} variantes de {gen} sin cambio en la proteína "
+                     "(no se pueden dibujar)"):
+        st.write("Variantes de *splicing*, intrónicas, en las UTR o descritas solo en "
+                 "coordenadas genómicas. Las de *splicing* pueden ser patogénicas aunque "
+                 "no cambien un aminoácido.")
+        st.dataframe(pd.crosstab(sin_posicion["consecuencia"], sin_posicion["grupo"]))
+        st.dataframe(sin_posicion[["cambio_c", "consecuencia", "grupo", "clasificacion",
+                                   "condicion", "clinvar_id"]], hide_index=True)
 
 st.subheader("Variantes por región")
 conteo = []
@@ -200,7 +255,7 @@ for _, fila in regiones_gen.iterrows():
 st.dataframe(pd.DataFrame(conteo), hide_index=True)
 
 st.subheader("Tabla de variantes")
-st.dataframe(variantes.sort_values("posicion_aa"), hide_index=True)
+st.dataframe(variantes.drop(columns=["altura"]), hide_index=True)
 
 # ===============================================================
 # 7. VER UNA VARIANTE EN 3D
@@ -210,8 +265,8 @@ st.header("Ver una variante en la estructura 3D")
 # ---------------------------------------------------------------
 # 7a. Elegir la variante
 # ---------------------------------------------------------------
-variantes_ordenadas = variantes.sort_values("posicion_aa").reset_index(drop=True)
-etiquetas = [f"{v['cambio_p']}  ·  {v['consecuencia']}  ·  {v['clasificacion']}"
+variantes_ordenadas = variantes.reset_index(drop=True)
+etiquetas = [f"{'★ ' if v['tirosina_ITAM'] else ''}{v['cambio_p']}  ·  {v['consecuencia']}  ·  {v['grupo']}"
              for _, v in variantes_ordenadas.iterrows()]
 eleccion = st.selectbox("Variante", range(len(etiquetas)), format_func=lambda i: etiquetas[i])
 variante = variantes_ordenadas.iloc[eleccion]
@@ -244,10 +299,18 @@ for linea in pdb.splitlines():
 longitud = max(aminoacidos)
 
 # ---------------------------------------------------------------
-# 7c. Comprobar que el aminoácido de ClinVar es el mismo del modelo
+# 7c. Casos que no se pueden mostrar en 3D
 # ---------------------------------------------------------------
-# p.Trp59Ter -> original "Trp". Si no coincide, la numeración no cuadra.
-original = re.search(r"p\.([A-Za-z]{3})", variante["cambio_p"]).group(1).upper()
+if posicion > longitud:
+    # p.Ter208=: el codón de parada está justo después del último aminoácido
+    st.info(f"{variante['cambio_p']} está en el codón de parada (posición {posicion}); "
+            "no corresponde a ningún aminoácido del modelo.")
+    st.stop()
+
+# ---------------------------------------------------------------
+# 7d. Comprobar que el aminoácido de ClinVar es el mismo del modelo
+# ---------------------------------------------------------------
+original = str(variante["aa_ref"]).upper()
 if aminoacidos.get(posicion) != original:
     st.error(f"ClinVar dice que en la posición {posicion} hay {original}, pero en el modelo "
              f"hay {aminoacidos.get(posicion)}. La numeración no coincide.")
@@ -273,7 +336,7 @@ def distancia(a, b):
 
 
 # ---------------------------------------------------------------
-# 7d. Funciones para dibujar
+# 7e. Funciones para dibujar
 # ---------------------------------------------------------------
 def crear_vista():
     """Un visor 3D con la proteína pintada con los colores de sus regiones."""
@@ -341,7 +404,7 @@ def mapa_lineal(clave, corte=None):
 
 
 # ---------------------------------------------------------------
-# 7e. Dos pestañas: la variante y la proteína normal
+# 7f. Dos pestañas: la variante y la proteína normal
 # ---------------------------------------------------------------
 es_truncante = variante["consecuencia"] in ("nonsense", "frameshift")
 pestana_variante, pestana_normal = st.tabs(["🧬 Variante", "✅ Proteína normal"])
@@ -363,7 +426,7 @@ with pestana_variante:
         conservado = posicion - 1
         with columna_info:
             st.subheader("Variante truncante")
-            st.write(f"**{variante['cambio_p']}** ({variante['consecuencia']})")
+            st.write(f"**{variante['cambio_p']}** ({variante['consecuencia']}) · {variante['clasificacion']}")
             st.write(f"Se conservan los aminoácidos **1–{conservado}** "
                      f"({conservado / longitud:.0%} de la proteína). "
                      f"Desde el **{posicion}** hasta el **{longitud}** la proteína se pierde"
@@ -381,7 +444,7 @@ with pestana_variante:
                        "(*nonsense-mediated decay*).")
 
     else:
-        # ---------------- OPCIÓN 2: variante missense ----------------
+        # ------- OPCIÓN 2: cambio puntual (missense, inframe, inicio, sinónima) -------
         # Vecinos: aminoácidos con algún átomo a menos de 5 Å de algún átomo del residuo
         vecinos = []
         for otro, sus_atomos in atomos.items():
@@ -405,25 +468,33 @@ with pestana_variante:
         marcar_variante(vista, {"colorscheme": "magentaCarbon", "radius": 0.3})
         vista.zoomTo({"resi": [posicion] + vecinos})
 
-        nuevo = re.search(r"p\.[A-Za-z]{3}\d+([A-Za-z]{3})", variante["cambio_p"])
+        nuevo = re.search(r"p\.[A-Za-z]{3}\d+([A-Z][a-z]{2})", str(variante["cambio_p"]))
         nuevo = nuevo.group(1).upper() if nuevo else None
 
+        titulos = {"missense": "Variante missense", "inframe_indel": "Inserción/deleción sin corrimiento",
+                   "perdida_inicio": "Pérdida del codón de inicio", "sinonima": "Variante sinónima"}
         with columna_info:
-            st.subheader("Variante missense")
-            st.write(f"**{variante['cambio_p']}**")
+            st.subheader(titulos.get(variante["consecuencia"], "Variante"))
+            st.write(f"**{variante['cambio_p']}** · {variante['clasificacion']}")
             st.write(f"- Original: {PROPIEDADES.get(original, original)}")
-            if nuevo:
+            if nuevo and nuevo != original:
                 st.write(f"- Nuevo: {PROPIEDADES.get(nuevo, nuevo)}")
             st.write(f"- Región: {variante['regiones'] or 'sin región anotada'}")
             st.write(f"- Entorno: **{entorno}** ({cercanos} aminoácidos cercanos)")
             st.write(f"- Vecinos a menos de 5 Å: {len(vecinos)}")
             st.write(f"- Confianza del modelo (pLDDT): **{plddt[posicion]:.0f}**")
 
+            if variante["consecuencia"] == "perdida_inicio":
+                st.warning("Se pierde la metionina inicial: la proteína puede no producirse, "
+                           "o empezar en otra metionina más adelante.")
+            if variante["consecuencia"] == "sinonima":
+                st.info("No cambia el aminoácido. En general no afecta la proteína, salvo que "
+                        "altere el *splicing*.")
             if plddt[posicion] < 70:
                 st.warning("La confianza del modelo en esta zona es baja: el entorno 3D no es confiable.")
             if original == "CYS":
                 st.info("Es una cisteína: si forma un puente disulfuro, el cambio podría romperlo.")
-            if original == "TYR" and "ITAM" in variante["regiones"]:
+            if variante["tirosina_ITAM"]:
                 st.info("Es una tirosina del ITAM: sin ella no se puede fosforilar ni unir ZAP-70.")
 
             st.caption("El entorno se calcula sobre la cadena sola. En el complejo real, un residuo "
