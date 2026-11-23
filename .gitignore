@@ -1,0 +1,32 @@
+# --- Datos pesados: no se suben, se regeneran con los scripts de descarga ---
+# (variant_summary.txt.gz de ClinVar queda ignorado por *.gz)
+*.gz
+*.fastq
+*.fq
+*.fast5
+*.pod5
+*.bam
+*.bai
+*.cram
+*.crai
+*.sam
+
+# --- Resultados generados por el código ---
+resultados/
+
+# --- Python ---
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# --- Streamlit ---
+.streamlit/secrets.toml
+
+# --- Sistema operativo / editor ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+
+# --- Claves de API (por ejemplo OMIM) ---
+.env

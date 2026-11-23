@@ -1,0 +1,20 @@
+name: tcrcd3
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pandas
+  - biopython
+  - requests
+  - streamlit
+  - plotly
+  - pip
+  - pip:
+      - py3Dmol
+  # --- Bioinformática (descomentar cuando se empiece el pipeline de Nanopore) ---
+  # - nanoplot
+  # - chopper
+  # - minimap2
+  # - samtools
+  # - bcftools
