@@ -27,6 +27,7 @@ import pandas as pd
 CLINVAR = Path("datos/clinvar/variant_summary.txt.gz")
 REGIONES = Path("datos/regiones_funcionales/regiones.csv")
 REFERENCIAS = Path("datos/referencias")
+ESTRUCTURAS = Path("datos/estructuras")
 SALIDA = Path("datos/ejemplos")
 
 GENES = ["CD3D", "CD3E", "CD3G", "CD247"]
@@ -142,15 +143,56 @@ def consecuencia(hgvs_c, hgvs_p):
 # ---------------------------------------------------------------------------
 # 4. Cruzar con regiones.csv y con el FASTA
 # ---------------------------------------------------------------------------
-def leer_fastas():
-    """Lee los FASTA que existan en datos/referencias/ → {gen: secuencia}."""
-    secuencias = {}
+def secuencia_desde_pdb(ruta):
+    """Lee la secuencia del modelo de AlphaFold (un aminoácido por carbono alfa)."""
+    tres_a_una = {k.upper(): v for k, v in AA3.items()}
+    residuos = {}
+    for linea in ruta.read_text().splitlines():
+        if linea.startswith("ATOM") and linea[12:16].strip() == "CA":
+            residuos[int(linea[22:26])] = tres_a_una.get(linea[17:20], "X")
+    return "".join(residuos[i] for i in sorted(residuos))
+
+
+def leer_secuencias(regiones):
+    """
+    Secuencia de cada proteína → {gen: secuencia}.
+    Usa el FASTA de datos/referencias/; si falta, la saca del modelo de AlphaFold
+    (misma numeración, ya verificada). Devuelve también de dónde salió cada una.
+    """
+    secuencias, origen = {}, {}
     for gen in GENES:
-        ruta = REFERENCIAS / f"{gen}_proteina.fasta"
-        if ruta.exists():
-            lineas = ruta.read_text().splitlines()
+        fasta = REFERENCIAS / f"{gen}_proteina.fasta"
+        if fasta.exists():
+            lineas = fasta.read_text().splitlines()
             secuencias[gen] = "".join(l.strip() for l in lineas if not l.startswith(">"))
-    return secuencias
+            origen[gen] = "FASTA"
+            continue
+        uniprot = regiones.loc[regiones["gen"] == gen, "uniprot"]
+        if uniprot.empty:
+            continue
+        modelos = sorted(ESTRUCTURAS.glob(f"AF-{uniprot.iloc[0]}-F1-model_v*.pdb"))
+        if modelos:
+            secuencias[gen] = secuencia_desde_pdb(modelos[-1])
+            origen[gen] = "AlphaFold"
+    return secuencias, origen
+
+
+def tirosinas_canonicas_itam(regiones, secuencias):
+    """
+    Tirosinas de los ITAM que siguen el patrón YxxL/I → {gen: {posiciones}}.
+    Un ITAM es YxxL/I – (6 a 8 aa) – YxxL/I: solo esas tirosinas se fosforilan.
+    Otras tirosinas que caen dentro del rango del ITAM (como la Y64 de CD3ζ) no cuentan.
+    """
+    resultado = {}
+    for _, fila in regiones[regiones["descripcion"] == "ITAM"].iterrows():
+        sec = secuencias.get(fila["gen"])
+        if sec is None:
+            continue
+        for pos in range(fila["inicio"], fila["fin"] + 1):
+            # pos está numerada desde 1; en Python la cadena empieza en 0
+            if sec[pos - 1] == "Y" and pos + 2 < len(sec) and sec[pos + 2] in "LI":
+                resultado.setdefault(fila["gen"], set()).add(pos)
+    return resultado
 
 
 def anotar_regiones(fila, regiones):
@@ -165,9 +207,14 @@ def anotar_regiones(fila, regiones):
     return ";".join(nombres)
 
 
-def tirosina_itam(fila):
-    """True si la variante cambia una tirosina que está dentro de un ITAM."""
-    return fila["aa_ref"] == "Tyr" and "ITAM" in fila["regiones"].split(";")
+def tirosina_itam(fila, tirosinas):
+    """True si la variante cambia una de las tirosinas canónicas (YxxL/I) de un ITAM."""
+    pos = fila["posicion_proteina"]
+    if pd.isna(pos) or fila["aa_ref"] != "Tyr":
+        return False
+    if str(fila["hgvs_p"]).endswith("="):
+        return False  # sinónima: la tirosina no cambia
+    return int(pos) in tirosinas.get(fila["GeneSymbol"], set())
 
 
 def revisar_fasta(fila, secuencias):
@@ -237,9 +284,10 @@ def main():
     tabla.loc[solo_g, "consecuencia"] = "solo_genomica"
 
     regiones = pd.read_csv(REGIONES)
-    secuencias = leer_fastas()
+    secuencias, origen = leer_secuencias(regiones)
+    tirosinas = tirosinas_canonicas_itam(regiones, secuencias)
     tabla["regiones"] = tabla.apply(anotar_regiones, axis=1, regiones=regiones)
-    tabla["tirosina_ITAM"] = tabla.apply(tirosina_itam, axis=1)
+    tabla["tirosina_ITAM"] = tabla.apply(tirosina_itam, axis=1, tirosinas=tirosinas)
     tabla["revision_fasta"] = tabla.apply(revisar_fasta, axis=1, secuencias=secuencias)
 
     columnas_salida = [
@@ -259,7 +307,14 @@ def main():
     print(pd.crosstab(tabla["GeneSymbol"], tabla["grupo"], margins=True, margins_name="Total"))
     print("\nConsecuencia por grupo clínico:")
     print(pd.crosstab(tabla["consecuencia"], tabla["grupo"], margins=True, margins_name="Total"))
-    print(f"\nVariantes que tocan una tirosina del ITAM: {tabla['tirosina_ITAM'].sum()}")
+    print("\nTirosinas canónicas de los ITAM (YxxL/I):")
+    for gen in GENES:
+        posiciones = ", ".join(f"Y{p}" for p in sorted(tirosinas.get(gen, [])))
+        print(f"  {gen}: {posiciones or 'sin secuencia'}  (secuencia de {origen.get(gen, '—')})")
+    print(f"Variantes que cambian una de esas tirosinas: {tabla['tirosina_ITAM'].sum()}")
+    itam = tabla[tabla["tirosina_ITAM"]]
+    for _, x in itam.iterrows():
+        print(f"  {x['GeneSymbol']} {x['hgvs_p']} · {x['grupo']}")
     print("\nRevisión contra el FASTA canónico:")
     print(tabla["revision_fasta"].value_counts().to_string())
     transcritos = tabla.dropna(subset=["transcrito"]).groupby("GeneSymbol")["transcrito"].unique()

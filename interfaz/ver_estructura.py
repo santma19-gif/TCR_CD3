@@ -130,11 +130,13 @@ else:
             color = COLORES.get(nombre_region(fila), "#bdbdbd")
             vista.setStyle({"resi": posiciones}, {"cartoon": {"color": color}})
 
-# Buscar las tirosinas (TYR) que caen dentro de algún ITAM del CSV
+# Buscar las tirosinas canónicas de cada ITAM: las del patrón YxxL/I
+# (tirosina, dos aminoácidos cualquiera y luego leucina o isoleucina).
+# Otras tirosinas que caen dentro del rango del ITAM no se fosforilan.
 tirosinas_itam = []
 for _, fila in regiones_gen[regiones_gen["descripcion"] == "ITAM"].iterrows():
     for residuo in range(fila["inicio"], fila["fin"] + 1):
-        if aminoacidos.get(residuo) == "TYR":
+        if aminoacidos.get(residuo) == "TYR" and aminoacidos.get(residuo + 3) in ("LEU", "ILE"):
             tirosinas_itam.append(residuo)
 
 if mostrar_tirosinas:
